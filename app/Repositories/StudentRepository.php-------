@@ -1,0 +1,214 @@
+<?php
+
+namespace App\Repositories;
+
+use App\Interfaces\StudentRepositoryInterface;
+use App\Models\Student;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
+
+class StudentRepository implements StudentRepositoryInterface
+{
+    protected $model;
+
+    public function __construct(Student $model)
+    {
+        $this->model = $model;
+    }
+
+    public function all(array $filters = [], int $perPage = 15)
+    {
+        $cacheKey = 'students:' . md5(serialize($filters) . $perPage . request('page', 1));
+
+        return Cache::remember($cacheKey, 3600, function () use ($filters, $perPage) {
+            return Student::query()
+    ->select([
+        'id',
+        'uuid',
+        'full_name',
+        'email',
+        'mobile',
+        'date_of_birth',
+        'gender',
+        'address',
+        'status',
+        'created_at',
+        'updated_at',
+    ])
+    ->when(isset($filters['search']), function ($query) use ($filters) {
+        $query->where(function ($q) use ($filters) {
+            $q->where('full_name', 'LIKE', "%{$filters['search']}%")
+              ->orWhere('email', 'LIKE', "%{$filters['search']}%")
+              ->orWhere('mobile', 'LIKE', "%{$filters['search']}%");
+        });
+    })
+    ->when(isset($filters['status']), function ($query) use ($filters) {
+        $query->where('status', $filters['status']);
+    })
+    ->when(isset($filters['gender']), function ($query) use ($filters) {
+        $query->where('gender', $filters['gender']);
+    })
+    ->when(isset($filters['course_id']), function ($query) use ($filters) {
+        $query->whereHas('admissions', function ($q) use ($filters) {
+            $q->where('course_id', $filters['course_id']);
+        });
+    })
+    ->when(isset($filters['date_from']), function ($query) use ($filters) {
+        $query->whereDate('created_at', '>=', $filters['date_from']);
+    })
+    ->when(isset($filters['date_to']), function ($query) use ($filters) {
+        $query->whereDate('created_at', '<=', $filters['date_to']);
+    })
+    ->when(isset($filters['sort_by']), function ($query) use ($filters) {
+        $query->orderBy(
+            $filters['sort_by'],
+            $filters['sort_direction'] ?? 'asc'
+        );
+    }, function ($query) {
+        $query->orderByDesc('created_at');
+    })
+    ->paginate($perPage);
+            // return DB::table('students')
+            //     ->select('id', 'uuid', 'full_name', 'email', 'mobile', 'date_of_birth', 'gender', 'address', 'status', 'created_at', 'updated_at')
+            //     ->when(isset($filters['search']), function ($query) use ($filters) {
+            //         return $query->where('full_name', 'LIKE', "%{$filters['search']}%")
+            //                     ->orWhere('email', 'LIKE', "%{$filters['search']}%")
+            //                     ->orWhere('mobile', 'LIKE', "%{$filters['search']}%");
+            //     })
+            //     ->when(isset($filters['status']), function ($query) use ($filters) {
+            //         return $query->where('status', $filters['status']);
+            //     })
+            //     ->when(isset($filters['gender']), function ($query) use ($filters) {
+            //         return $query->where('gender', $filters['gender']);
+            //     })
+            //     ->when(isset($filters['course_id']), function ($query) use ($filters) {
+            //         return $query->whereExists(function ($subQuery) use ($filters) {
+            //             $subQuery->select(DB::raw(1))
+            //                 ->from('admissions')
+            //                 ->whereColumn('admissions.student_id', 'students.id')
+            //                 ->where('admissions.course_id', $filters['course_id']);
+            //         });
+            //     })
+            //     ->when(isset($filters['date_from']), function ($query) use ($filters) {
+            //         return $query->whereDate('created_at', '>=', $filters['date_from']);
+            //     })
+            //     ->when(isset($filters['date_to']), function ($query) use ($filters) {
+            //         return $query->whereDate('created_at', '<=', $filters['date_to']);
+            //     })
+            //     ->when(isset($filters['sort_by']), function ($query) use ($filters) {
+            //         $direction = $filters['sort_direction'] ?? 'asc';
+            //         return $query->orderBy($filters['sort_by'], $direction);
+            //     }, function ($query) {
+            //         return $query->orderBy('created_at', 'desc');
+            //     })
+            //     ->paginate($perPage);
+        });
+    }
+
+    public function find(int $id)
+    {
+        return Cache::remember("student:{$id}", 3600, function () use ($id) {
+            return $this->model->with(['admissions.course', 'courses'])->findOrFail($id);
+        });
+    }
+
+    public function findByUuid(string $uuid)
+    {
+        return $this->model->where('uuid', $uuid)->firstOrFail();
+    }
+
+    public function findByEmail(string $email)
+    {
+        return $this->model->where('email', $email)->first();
+    }
+
+    public function findByMobile(string $mobile)
+    {
+        return $this->model->where('mobile', $mobile)->first();
+    }
+
+    public function create(array $data)
+    {
+        return DB::transaction(function () use ($data) {
+            $student = $this->model->create($data);
+            Cache::forget('students:*');
+            Cache::forget('dashboard:stats');
+            return $student;
+        });
+    }
+
+    public function update(int $id, array $data)
+    {
+        return DB::transaction(function () use ($id, $data) {
+            $student = $this->find($id);
+            $student->update($data);
+            Cache::forget("student:{$id}");
+            Cache::forget('students:*');
+            Cache::forget('dashboard:stats');
+            return $student;
+        });
+    }
+
+    public function delete(int $id)
+    {
+        return DB::transaction(function () use ($id) {
+            $student = $this->find($id);
+            
+            // Delete related admissions
+            $student->admissions()->delete();
+            
+            $student->delete();
+            Cache::forget("student:{$id}");
+            Cache::forget('students:*');
+            Cache::forget('dashboard:stats');
+            return true;
+        });
+    }
+
+    public function search(string $search, array $filters = [], int $perPage = 15)
+    {
+        $filters['search'] = $search;
+        return $this->all($filters, $perPage);
+    }
+
+    public function getStats(): array
+    {
+        return Cache::remember('students:stats', 3600, function () {
+            return [
+                'total' => $this->model->count(),
+                'active' => $this->model->active()->count(),
+                'inactive' => $this->model->inactive()->count(),
+                'male' => $this->model->where('gender', 'male')->count(),
+                'female' => $this->model->where('gender', 'female')->count(),
+                'other' => $this->model->where('gender', 'other')->count(),
+            ];
+        });
+    }
+
+    public function getRecentStudents(int $limit = 5)
+    {
+        return Cache::remember("students:recent:{$limit}", 3600, function () use ($limit) {
+            return $this->model->with('admissions')
+                ->orderBy('created_at', 'desc')
+                ->limit($limit)
+                ->get();
+        });
+    }
+
+    public function getStudentsByCourse(int $courseId)
+    {
+        return $this->model->whereHas('admissions', function ($query) use ($courseId) {
+            $query->where('course_id', $courseId);
+        })->get();
+    }
+
+    public function getGenderDistribution(): array
+    {
+        return Cache::remember('students:gender_distribution', 3600, function () {
+            return $this->model->select('gender', DB::raw('count(*) as total'))
+                ->groupBy('gender')
+                ->pluck('total', 'gender')
+                ->toArray();
+        });
+    }
+}
